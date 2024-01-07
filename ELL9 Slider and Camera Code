@@ -1,0 +1,145 @@
+import altaircam
+import numpy as np
+import pyvisa as visa
+from logging import getLogger, basicConfig, DEBUG
+from functools import wraps
+import struct
+from thorlabs_ell9.ell9 import ELL9
+import time
+from asdf import AsdfFile
+
+
+
+
+
+logger = getLogger("ELL9")
+basicConfig()
+logger.setLevel(DEBUG)
+
+class ELL9CameraControl:
+    def __init__(self, resource_addr: str = 'ASRL/dev/ttyUSB0::INSTR', dev_number=0):
+        self.camera = None
+        self.hcam = None
+        self.buf = None
+        self.total = 0
+        self.ell9 = self.init_ell9(resource_addr, dev_number)
+
+    def init_ell9(self, resource_addr, dev_number):
+        rm = visa.ResourceManager()
+        ell9_instance = ELL9(resource_addr, dev_number)
+        ell9_instance.buf = self.buf  # Assign buf attribute to ELL9 instance
+        return ell9_instance
+        #return ELL9(resource_addr, dev_number)
+    def set_trigger_mode(self, mode):
+        if self.hcam:
+            try:
+                self.hcam.put_Option(altaircam.ALTAIRCAM_OPTION_TRIGGER, mode)
+                print('Trigger mode set to {}'.format(mode))
+            except altaircam.HRESULTException as ex:
+                print('Failed to set the trigger mode, hr=0x{:x}'.format(ex.hr))
+        else:
+            print('camera is not initialized.')
+
+    def set_exposure_time(self, exposure_time):
+        if self.hcam:
+            try:
+                self.hcam.put_AutoExpoEnable(False)
+                self.hcam.put_ExpoTime(int(exposure_time))
+                print('Exposure time set to {} '.format(exposure_time))
+            except altaircam.HRESULTException as ex:
+                print('Failed to set exposure time, hr=0x{:x}'.format(ex.hr))
+        else:
+            print('Camera is not initialized.')
+
+    def set_raw_mode(self):
+        if self.hcam:
+            try:
+                self.hcam.put_Option(altaircam.ALTAIRCAM_OPTION_RAW, 1)
+                print('RAW format enabled')
+            except altaircam.HRESULTException as ex:
+                print('Failed to enable RAW format, hr=0x{:x}'.format(ex.hr))
+        else:
+            print('Camera is not initialized.')
+
+    def CameraCallback(self, nEvent, ctx):
+        if nEvent == altaircam.ALTAIRCAM_EVENT_IMAGE:
+            try:
+                self.hcam.PullImageV2(self.buf, 24, None)
+                self.total += 1
+                print('pull image ok, total = {}'.format(self.total))
+            except altaircam.HRESULTException as ex:
+                print('pull image failed, hr=0x{:x}'.format(ex.hr))
+        else:
+            print('event callback: {}'.format(nEvent))
+
+    def run_camera(self):
+        a = altaircam.Altaircam.EnumV2()
+        if len(a) > 0:
+            print('{}: flag = {:#x}, \
+                preview = {}, \
+                still = {}, \
+                x-px-size = {}, \
+                y-px-size = {}'\
+                .format(a[0].displayname, 
+                        a[0].model.flag, 
+                        a[0].model.preview, 
+                        a[0].model.still, 
+                        a[0].model.xpixsz, 
+                        a[0].model.ypixsz))
+            for r in a[0].model.res:
+                print('\t = [{} x {}]'.format(r.width, r.height))
+            self.hcam = altaircam.Altaircam.Open(a[0].id)
+            if self.hcam:
+                try:
+                    self.hcam.put_eSize(3)
+                    width, height = self.hcam.get_Size()
+                    bufsize = ((width * height))
+                    print('image size: {} x {}, bufsize = {}'.format(width, height, bufsize))
+                    self.buf = bytes(bufsize)
+                    self.set_exposure_time(exposure_time=500000) #set the exposure time 
+                    print(self.hcam.get_ExpTimeRange())
+                    self.set_raw_mode()
+                    self.set_trigger_mode(mode=1) #set the trigger mode value
+
+                    if self.buf:
+                        try:
+                            self.hcam.StartPullModeWithCallback(self.CameraCallback, self)
+                        except altaircam.HRESULTException as ex:
+                            print('failed to start camera, hr=0x{:x}'.format(ex.hr))
+                    # input('press ENTER to exit')
+                finally:
+                    # self.hcam.Close()
+                    # self.hcam = None
+                    # self.buf = None
+                    pass
+            else:
+                print('failed to open camera')
+        else:
+            print('no camera found')
+
+    def capture_and_move(self, position, file_name, cam=bytes()):
+        assert self.hcam is not None
+        self.ell9.move_to_pos(position)
+        logger.info(self.ell9.get_position())
+        exposure_time = self.hcam.get_ExpoTime() # get the exposure time
+        self.hcam.Trigger(1)
+        sleep_time = exposure_time *1.02e-6 + 1 #calculating the sleep time as per recommendation
+        time.sleep(sleep_time) #sleep time after triggering the camera
+        if self.buf:
+            image_data = np.frombuffer(self.buf, dtype=np.uint8)
+            ff = AsdfFile()
+            ff.tree['image_data'] = image_data #creating tree for asdf file
+            ff.tree['position'] = position
+            ff.tree['exposure_time'] = exposure_time
+            ff.write_to(file_name + ".asdf")
+
+
+if __name__ == '__main__':
+    ell9_camera = ELL9CameraControl()
+    try:
+        ell9_camera.run_camera()  # Initialize the camera
+        for i in range(4):
+            ell9_camera.capture_and_move(i, "image0_{}".format(i))
+
+    finally:
+        ell9_camera.hcam.Close()
