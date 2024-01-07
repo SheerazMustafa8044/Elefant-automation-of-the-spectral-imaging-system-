@@ -1,0 +1,85 @@
+import pyvisa as visa
+from logging import getLogger, basicConfig, DEBUG
+from functools import wraps
+import struct
+logger = getLogger("ELL9")
+basicConfig()
+logger.setLevel(DEBUG)
+
+def debug_serial(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        res = func(*args, **kwargs)
+        logger.debug(f"CMD: {args[1:]}. Responce: {res}")
+        return res
+    return wrapper
+
+
+
+
+class ELL9:
+    def __init__(self, resource_addr:str='ASRL/dev/ttyUSB0::INSTR', dev_number=0):
+        rm = visa.ResourceManager()
+        self._dev_num = dev_number
+        self._interface:visa.resources.SerialInstrument = rm.open_resource(resource_addr)
+        assert isinstance(self._interface, visa.resources.SerialInstrument)
+
+    def add_dev_number(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            self = args[0]
+            cmd = args[1]
+            cmd = str(self._dev_num) + cmd
+            return func(self, cmd, *args[2:], **kwargs)
+        return wrapper
+            
+
+    def write(self, cmd:str):
+        self._interface.write(cmd)
+
+    
+    @add_dev_number
+    @debug_serial
+    def query(self, cmd:str)->str:
+        return self._interface.query(cmd)
+    
+    def move_relative(self, dir:int):
+        if dir == 1:
+            self.move_forward()
+        if dir == -1:
+            self.move_backward()
+        return
+
+    def move_backward(self):
+        self.query("bw")
+
+    def move_forward(self):
+        self.query("fw")
+    
+    def move_to_pos(self, pos:int):
+        cur_pos = self.get_position()
+        diff = pos - cur_pos
+        if diff:
+            dir = int(2*(diff>0)) - 1
+            for i in range(abs(diff)):
+                self.move_relative(dir)
+
+    
+    def get_position(self):
+        res = self.query("gp")
+        pos = int(res[3:], 16)//31
+        return pos
+
+    
+
+test = ELL9()
+test.query("in")
+# test.query("0ho0")
+# test.query("0fw")
+# test.query("0fw")
+# test.query("0fw")
+# test.query("0ho0")
+# test.query("0bw")
+# logger.info(test.get_position())
+test.move_to_pos(0)
+
